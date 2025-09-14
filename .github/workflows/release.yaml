@@ -6,17 +6,19 @@ on:
       - "v*"
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Create zips for labs
         run: |
-          mkdir artifacts
+          mkdir -p artifacts
           for d in lab*/ ; do
             [ -d "$d" ] || continue
             zip -r "artifacts/${d%/}.zip" "$d"
