@@ -16,4 +16,5 @@ class Scene:
     def update_grid(self):
         x = np.linspace(-self.W / 2, self.W / 2, Scene.Wres)
         y = np.linspace(-self.H / 2, self.H / 2, Scene.Hres)
+
         self.X, self.Y = np.meshgrid(x, y)
