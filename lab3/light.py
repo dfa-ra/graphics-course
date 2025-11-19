@@ -42,8 +42,8 @@ class Light:
 
         E = self.intensity * cos_theta / (r ** 2 + 1e-9)
 
-        if self.spot_radius is not None:
-            dist_xy = np.sqrt((X - self.x) ** 2 + (Y - self.y) ** 2)
-            E[dist_xy > self.spot_radius] = 0  # обрубаем строго по кругу
+        # if self.spot_radius is not None:
+        #     dist_xy = np.sqrt((X - self.x) ** 2 + (Y - self.y) ** 2)
+        #     E[dist_xy > self.spot_radius] = 0  # обрубаем строго по кругу
 
         return E
