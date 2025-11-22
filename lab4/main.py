@@ -5,31 +5,25 @@ import re
 
 # ==================== НАСТРОЙКИ ====================
 center = np.array([0.0, 0.0, 1000.0])  # центр сферы
-R = 400.0  # радиус сферы
+R = 20.0  # радиус сферы
 
 kd = 0.5
 ks = 0.8
 shininess = 200.0
 
-
 Wres = Hres = 100
 W_mm = H_mm = 2000.0
 screen_z = 0.0
 
-# начальные значения
 initial_z = 3000.0
-initial_lights = "[-600,-500,1500];[700,-400,1600]"  # можно менять здесь
-
-# ===================================================
+initial_lights = "[-600,-500,1500,12000];[700,-400,1600,12000]"  # можно менять здесь
 
 root = tk.Tk()
 root.title("ЛР4 — Сфера Блинн-Фонг (камера + источники света)")
 
-# --- Переменные ---
 z_var = tk.DoubleVar(value=initial_z)
 lights_str = tk.StringVar(value=initial_lights)
 
-# --- GUI ---
 tk.Label(root, text="Z наблюдателя [мм]:", font=("Arial", 12)).pack(pady=(15, 5))
 frame_z = tk.Frame(root)
 frame_z.pack(pady=5)
@@ -47,24 +41,19 @@ label_img = tk.Label(root, bg="gray20")
 label_img.pack(padx=10, pady=10)
 
 
-# --- Парсинг источников света ---
 def parse_lights(text):
     lights = []
-    # убираем пробелы и разбиваем по ;
     parts = text.replace(" ", "").split(';')
     for part in parts:
         if not part.strip():
             continue
-        # ищем числа внутри []
         nums = re.findall(r'-?\d+\.?\d*', part)
-        if len(nums) == 3:
-            x, y, z = map(float, nums)
-            I0 = 12000.0  # можно потом тоже сделать настраиваемым
+        if len(nums) == 4:
+            x, y, z, I0 = map(float, nums)
             lights.append({"pos": np.array([x, y, z]), "I0": I0})
     return lights
 
 
-# --- Основная функция рендера ---
 def render(*args):
     z_obs = z_var.get()
     observer_pos = np.array([0.0, 0.0, z_obs])
@@ -136,7 +125,7 @@ def render(*args):
     im.save("АКГ_лр4_сфера.png")
 
     display_size = 800
-    im_display = im.resize((display_size, display_size), Image.LANCZOS)
+    im_display = im.resize((display_size, display_size), Image.NEAREST)
 
     print(f"Изображение сохранено → АКГ_лр4_сфера.png")
 
@@ -144,7 +133,6 @@ def render(*args):
     print(f"Макс. яркость (абс.): {max_b:.6f}")
     print(f"Мин. яркость (абс.):  {min_b:.6f}")
 
-    # три точки
     def calc_at(p):
         N = normalize(p - center)
         V = normalize(observer_pos - p)
@@ -171,7 +159,6 @@ def render(*args):
     print(f"Яркость (+R,0,0): {calc_at(p2):.6f}")
     print(f"Яркость (0,+R,0): {calc_at(p3):.6f}")
 
-    # обновляем картинку
     photo = ImageTk.PhotoImage(im_display)
     label_img.config(image=photo)
     label_img.image = photo
@@ -182,7 +169,6 @@ def normalize(v):
     return v / n if n > 1e-8 else np.zeros(3)
 
 
-# --- Привязка событий ---
 def on_change(*args):
     render()
 
@@ -191,9 +177,8 @@ btn.config(command=render)
 btn.pack(pady=10)
 
 entry_lights.bind('<Return>', on_change)
-root.bind('<Return>', lambda e: render())  # Enter в любом поле
+root.bind('<Return>', lambda e: render())
 
-# первый рендер
 render()
 
 root.mainloop()
