@@ -127,19 +127,15 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
 
     right = normalize(forward.cross(world_up))
     up = normalize(right.cross(forward))
-
-    # ---------- Pixel size ----------
     half_w = w_mm / 2.0
     half_h = h_mm / 2.0
 
     for j in range(height):
         for i in range(width):
-            # ---------- Ray through pixel ----------
             u = (i + 0.5) / width - 0.5
             v = 0.5 - (j + 0.5) / height
             dir_norm = normalize(forward + u * 2.0 * half_w / width * right + v * 2.0 * half_h / height * up)
 
-            # --- Find nearest sphere ---
             nearest_t = 1e9
             nearest_idx = -1
             for s in range(num_spheres):
@@ -154,7 +150,6 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
                 out[j, i, 2] = 0.0
                 continue
 
-            # --- Shading ---
             P = cam + nearest_t * dir_norm
             C = sphere_pos[nearest_idx]
             N = normalize(P - C)
@@ -297,23 +292,18 @@ class LR5App:
         self.build_params_tab()
         self.build_render_tab()
 
-        # initial sync
         self.sync_scene_to_taichi()
-        # self.render_and_update()
 
     def schedule_camera_rerender(self):
-        # отменяем предыдущий таймер, если есть
         if self._cam_update_after_id is not None:
             self.root.after_cancel(self._cam_update_after_id)
 
-        # запускаем рендер через 80 мс (debounce)
         self._cam_update_after_id = self.root.after(80, self.render_and_update)
 
     def build_camera_tab(self):
         f = self.tab_camera
         ttk.Label(f, text="Camera position (always looks at 0,0,0)").pack(anchor='w')
 
-        # === Кнопки ортогональных видов ===
         view_frame = ttk.LabelFrame(f, text="Ортогональные проекции")
         view_frame.pack(fill='x', pady=8)
 
@@ -325,11 +315,9 @@ class LR5App:
         btn_top.pack(side='left', expand=True, fill='x', padx=4, pady=4)
         btn_side.pack(side='left', expand=True, fill='x', padx=4, pady=4)
 
-        # === Ручное управление камерой ===
         frm = ttk.Frame(f)
         frm.pack(anchor='w', pady=10)
 
-        # ---- X ----
         ttk.Label(frm, text="X").grid(row=0, column=0, padx=5)
         tk.Scale(frm, variable=self.cam_x, from_=-5000, to=5000,
                  orient='horizontal', length=300,
@@ -340,7 +328,6 @@ class LR5App:
         ex.grid(row=0, column=2, padx=5)
         ex.bind("<KeyRelease>", lambda e: self.schedule_camera_rerender())
 
-        # ---- Y ----
         ttk.Label(frm, text="Y").grid(row=1, column=0, padx=5)
         tk.Scale(frm, variable=self.cam_y, from_=-5000, to=5000,
                  orient='horizontal', length=300,
@@ -351,7 +338,6 @@ class LR5App:
         ey.grid(row=1, column=2, padx=5)
         ey.bind("<KeyRelease>", lambda e: self.schedule_camera_rerender())
 
-        # ---- Z ----
         ttk.Label(frm, text="Z").grid(row=2, column=0, padx=5)
         tk.Scale(frm, variable=self.cam_z, from_=200, to=20000,
                  orient='horizontal', length=300,
