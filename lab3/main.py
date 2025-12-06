@@ -1,5 +1,5 @@
-# lr3_akg_perfect.py
-# 100% соответствует ЛР№3 — без легенды, правильные сечения, W≠H
+# lr3_akg_perfect_square_pixels.py
+# Тепловая карта с квадратными пикселями и динамическим размером
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -11,19 +11,22 @@ from tkinter import ttk
 class LightingLabPerfect:
     def __init__(self, root):
         self.root = root
-        self.root.title("ЛР№3 АКГ — Финальная версия")
-        self.root.geometry("1400x900")
+        self.root.title("ЛР№3 — Квадратные пиксели")
+        self.root.geometry("1500x950")
 
+        # Параметры источника и количество пикселей
         self.vars = {
             'xL': tk.DoubleVar(value=624.0),
             'yL': tk.DoubleVar(value=0.0),
             'zL': tk.DoubleVar(value=1000.0),
             'I0': tk.DoubleVar(value=1000.0),
-            'W':  tk.DoubleVar(value=2000.0),
-            'H':  tk.DoubleVar(value=2000.0),
-            'R':  tk.DoubleVar(value=800.0),
-            'res': tk.IntVar(value=600)
+            'W':  tk.IntVar(value=600),   # пикселей по X
+            'H':  tk.IntVar(value=600),   # пикселей по Y
+            'R':  tk.DoubleVar(value=800.0)
         }
+
+        # Размер базовой сцены (1 пиксель = 1 мм для начального масштаба)
+        self.base_scene_size = 2000.0
 
         self.create_widgets()
         self.setup_plot()
@@ -44,10 +47,9 @@ class LightingLabPerfect:
             ("Y источника, мм", 'yL', -5000, 5000),
             ("Z источника, мм", 'zL', 100, 10000),
             ("Сила света I₀, Вт/ср", 'I0', 10, 20000),
-            ("Ширина сцены W, мм", 'W', 500, 12000),
-            ("Высота сцены H, мм", 'H', 500, 12000),
-            ("Радиус круга R, мм", 'R', 50, 6000),
-            ("Разрешение, пикс", 'res', 200, 800)
+            ("Пикселей по ширине W", 'W', 100, 1200),
+            ("Пикселей по высоте H", 'H', 100, 1200),
+            ("Радиус круга R, мм", 'R', 50, 6000)
         ]
 
         self.labels = {}
@@ -58,12 +60,12 @@ class LightingLabPerfect:
             lbl.grid(row=i, column=2)
             self.labels[key] = lbl
 
-            if key == 'res':
+            if isinstance(self.vars[key], tk.IntVar):
                 self.vars[key].trace_add("write", lambda *_, k=key: self.labels[k].config(text=str(int(self.vars[k].get()))))
             else:
                 self.vars[key].trace_add("write", lambda *_, k=key: self.labels[k].config(text=f"{self.vars[k].get():.1f}"))
 
-        ttk.Button(left, text="Сохранить PNG", command=self.save).grid(row=10, column=0, columnspan=3, pady=20)
+        ttk.Button(left, text="Сохранить PNG", command=self.save).grid(row=len(params)+1, column=0, columnspan=3, pady=20)
 
     def setup_plot(self):
         self.fig = Figure(figsize=(14, 9), dpi=100)
@@ -74,11 +76,16 @@ class LightingLabPerfect:
 
     def calculate(self):
         p = {k: v.get() for k, v in self.vars.items()}
-        res = int(p['res'])
+        Wres = int(p['W'])
+        Hres = int(p['H'])
+
+        # Пропорциональный физический размер сцены, чтобы пиксели были квадратными
+        scene_W = self.base_scene_size * (Wres / 600)  # базовое количество пикселей 600
+        scene_H = self.base_scene_size * (Hres / 600)
 
         # координаты центров пикселей
-        x = np.linspace(-p['W']/2, p['W']/2, res, endpoint=False) + p['W']/(2*res)
-        y = np.linspace(-p['H']/2, p['H']/2, res, endpoint=False) + p['H']/(2*res)
+        x = np.linspace(-scene_W/2, scene_W/2, Wres, endpoint=False) + scene_W/(2*Wres)
+        y = np.linspace(-scene_H/2, scene_H/2, Hres, endpoint=False) + scene_H/(2*Hres)
         X, Y = np.meshgrid(x, y)
 
         dx = X - p['xL']
@@ -98,73 +105,69 @@ class LightingLabPerfect:
         E_img[~mask] = 0
 
         # Статистика
-        E_circle = E[mask]
         stats = {
-            'center': E[res//2, res//2],
-            'max': np.max(E_circle) if E_circle.size else 0,
-            'min': np.min(E_circle) if E_circle.size else 0,
-            'mean': np.mean(E_circle) if E_circle.size else 0,
+            'center': E[Hres//2, Wres//2],
+            'max': np.max(E[mask]) if np.any(mask) else 0,
+            'min': np.min(E[mask]) if np.any(mask) else 0,
+            'mean': np.mean(E[mask]) if np.any(mask) else 0
         }
 
-        # Точки на границе круга
         def val_at(xx, yy):
-            xi = int((xx + p['W']/2) / p['W'] * res)
-            yi = int((yy + p['H']/2) / p['H'] * res)
-            if 0 <= xi < res and 0 <= yi < res:
+            xi = int((xx + scene_W/2) / scene_W * Wres)
+            yi = int((yy + scene_H/2) / scene_H * Hres)
+            if 0 <= xi < Wres and 0 <= yi < Hres:
                 return E[yi, xi]
             return np.nan
         stats['edge_x'] = val_at(p['R'], 0)
         stats['edge_y'] = val_at(0, p['R'])
 
-        return E_img, E, x, y, stats, p
+        return E_img, E, x, y, stats, p, Wres, Hres, scene_W, scene_H
 
     def update_plot(self):
         self.fig.clear()
-        E_img, E_full, x_line, y_line, stats, p = self.calculate()
-        res = int(p['res'])
+        E_img, E_full, x_line, y_line, stats, p, Wres, Hres, scene_W, scene_H = self.calculate()
 
-        # 1. Тепловая карта — без легенды!
+        # Тепловая карта
         ax1 = self.fig.add_subplot(2, 2, (1,2))
-        ax1.imshow(E_img, extent=[-p['W']/2, p['W']/2, -p['H']/2, p['H']/2], origin='lower', interpolation='nearest')
+        ax1.imshow(E_img, extent=[-scene_W/2, scene_W/2, -scene_H/2, scene_H/2],
+                   origin='lower', interpolation='none')
         circle = plt.Circle((0, 0), p['R'], color='cyan', fill=False, lw=2, ls='--')
         ax1.add_patch(circle)
         ax1.plot(p['xL'], p['yL'], 'yellow', marker='*', markersize=16, markeredgecolor='black', mew=1)
-        ax1.set_title(f'Тепловая карта {res}×{res} пикселей')
+        ax1.set_title(f'Тепловая карта {Wres}×{Hres} пикселей')
         ax1.set_xlabel('X, мм')
         ax1.set_ylabel('Y, мм')
         ax1.set_aspect('equal', adjustable='box')
 
-        # Цветовая шкала отдельно
         sm = plt.cm.ScalarMappable(cmap='hot', norm=plt.Normalize(0, 255))
         self.fig.colorbar(sm, ax=ax1, label='Нормированная яркость (0–255)', shrink=0.8)
 
-        # 2. Сечение по X — только в пределах сцены!
+        # Сечение по X
         ax2 = self.fig.add_subplot(2, 2, 3)
-        ax2.plot(x_line, E_full[res//2, :], color='#1f77b4', lw=1.8)
-        ax2.set_xlim(-p['W']/2, p['W']/2)
+        ax2.plot(x_line, E_full[Hres//2, :], color='#1f77b4', lw=1.8)
+        ax2.set_xlim(-scene_W/2, scene_W/2)
         ax2.set_title('Сечение по X (Y = 0)')
         ax2.set_xlabel('X, мм')
         ax2.set_ylabel('E, лк')
         ax2.grid(True, alpha=0.3)
 
-        # 3. Сечение по Y — только в пределах сцены!
+        # Сечение по Y
         ax3 = self.fig.add_subplot(2, 2, 4)
-        ax3.plot(y_line, E_full[:, res//2], color='#ff7f0e', lw=1.8)
-        ax3.set_xlim(-p['H']/2, p['H']/2)
+        ax3.plot(y_line, E_full[:, Wres//2], color='#ff7f0e', lw=1.8)
+        ax3.set_xlim(-scene_H/2, scene_H/2)
         ax3.set_title('Сечение по Y (X = 0)')
         ax3.set_xlabel('Y, мм')
         ax3.set_ylabel('E, лк')
         ax3.grid(True, alpha=0.3)
 
-        # Статистика
         txt = (f"Источник: ({p['xL']:.1f}, {p['yL']:.1f}, {p['zL']:.0f}) мм | I₀ = {p['I0']:.0f} Вт/ср\n"
-               f"W = {p['W']:.0f} мм | H = {p['H']:.0f} мм | R = {p['R']:.0f} мм\n\n"
-               f"E(0,0)     = {stats['center']:.2f} лк\n"
-               f"E(R,0)     = {stats['edge_x']:.2f} лк\n"
-               f"E(0,R)     = {stats['edge_y']:.2f} лк\n"
+               f"Радиус R = {p['R']:.0f} мм\n"
+               f"Разрешение: W×H = {Wres}×{Hres} пикселей\n"
+               f"Физический размер сцены: {scene_W:.0f}×{scene_H:.0f} мм\n\n"
+               f"E(0,0) = {stats['center']:.2f} лк | E(R,0) = {stats['edge_x']:.2f} лк | E(0,R) = {stats['edge_y']:.2f} лк\n"
                f"Eₘₐₓ = {stats['max']:.2f} лк | Eₘᵢₙ = {stats['min']:.2f} лк | Eₛᵣ = {stats['mean']:.2f} лк")
 
-        self.fig.suptitle("ЛР№3 — Освещённость от точечного источника (модель Ламберта)", fontsize=14)
+        self.fig.suptitle("ЛР№3 — Освещённость от точечного источника", fontsize=14)
         self.fig.text(0.01, 0.01, txt, fontsize=10.5, va='bottom',
                       bbox=dict(boxstyle="round,pad=0.7", facecolor="#f0f0f0"))
 
