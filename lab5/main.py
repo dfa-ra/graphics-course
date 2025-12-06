@@ -25,19 +25,15 @@ light_I0 = ti.field(dtype=ti.f32, shape=MAX_LIGHTS)
 light_col = ti.Vector.field(3, dtype=ti.f32, shape=MAX_LIGHTS)
 light_active = ti.field(dtype=ti.i32, shape=())  # count
 
-# Rendering parameters (host-updated scalars)
 kd_field = ti.field(dtype=ti.f32, shape=())
 ks_field = ti.field(dtype=ti.f32, shape=())
 shininess_field = ti.field(dtype=ti.f32, shape=())
 shadows_field = ti.field(dtype=ti.i32, shape=())  # 0/1
 
-# Camera params
 cam_x_field = ti.field(dtype=ti.f32, shape=())
 cam_y_field = ti.field(dtype=ti.f32, shape=())
 cam_z_field = ti.field(dtype=ti.f32, shape=())
 
-
-# Image field will be created when rendering with a particular resolution
 img_field = None
 IMG_W = 0
 IMG_H = 0
@@ -65,6 +61,7 @@ def parse_lights(text):
 
 def clamp(n, a, b):
     return max(a, min(b, n))
+
 
 @ti.func
 def normalize(v):
@@ -111,21 +108,38 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
 
     cam = ti.Vector([cam_x_field[None], cam_y_field[None], cam_z_field[None]])
 
-    pixel_size = max(w_mm / width, h_mm / height)
-    screen_w = pixel_size * width
-    screen_h = pixel_size * height
-
     num_spheres = sphere_active[None]
     num_lights = light_active[None]
 
-    for j in range(height):
-        y = screen_h / 2.0 - (j + 0.5) * pixel_size
-        for i in range(width):
-            x = -screen_w / 2.0 + (i + 0.5) * pixel_size
-            screen_pt = ti.Vector([x, y, screen_z])
-            dir_vec = screen_pt - cam
-            dir_norm = normalize(dir_vec)
+    center = ti.Vector([0.0, 0.0, 0.0])
+    for s in range(num_spheres):
+        center += sphere_pos[s]
+    if num_spheres > 0:
+        center /= num_spheres
+    else:
+        center = ti.Vector([0.0, 0.0, 0.0])
 
+    forward = normalize(center - cam)
+
+    world_up = ti.Vector([0.0, 1.0, 0.0])
+    if abs(forward.dot(world_up)) > 0.999:
+        world_up = ti.Vector([0.0, 0.0, 1.0])
+
+    right = normalize(forward.cross(world_up))
+    up = normalize(right.cross(forward))
+
+    # ---------- Pixel size ----------
+    half_w = w_mm / 2.0
+    half_h = h_mm / 2.0
+
+    for j in range(height):
+        for i in range(width):
+            # ---------- Ray through pixel ----------
+            u = (i + 0.5) / width - 0.5
+            v = 0.5 - (j + 0.5) / height
+            dir_norm = normalize(forward + u * 2.0 * half_w / width * right + v * 2.0 * half_h / height * up)
+
+            # --- Find nearest sphere ---
             nearest_t = 1e9
             nearest_idx = -1
             for s in range(num_spheres):
@@ -140,6 +154,7 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
                 out[j, i, 2] = 0.0
                 continue
 
+            # --- Shading ---
             P = cam + nearest_t * dir_norm
             C = sphere_pos[nearest_idx]
             N = normalize(P - C)
@@ -151,12 +166,8 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
                 continue
 
             surf_col = sphere_col[nearest_idx]
-
-            # Start with a small ambient to avoid pure black
             ambient = 0.05 * surf_col
-            cr = ambient[0]
-            cg = ambient[1]
-            cb = ambient[2]
+            cr, cg, cb = ambient[0], ambient[1], ambient[2]
 
             for Lidx in range(num_lights):
                 Lpos = light_pos[Lidx]
@@ -172,11 +183,11 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
 
                 H = normalize(L + V)
 
-                # Shadow test
+                # Shadow
                 in_shadow = False
                 if shadows_on:
                     eps = 1e-3
-                    shadow_o = P + eps * N  # Bias along normal to avoid self-shadow
+                    shadow_o = P + eps * N
                     shadow_dir = L
                     for s2 in range(num_spheres):
                         if s2 == nearest_idx:
@@ -185,7 +196,6 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
                         if t_sh > 0.0 and t_sh < dist - 1e-6:
                             in_shadow = True
                             break
-
                 if in_shadow:
                     continue
 
@@ -201,7 +211,6 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
                 cg += diffuse[1] + specular[1]
                 cb += diffuse[2] + specular[2]
 
-            # Clamp to [0,1] for display
             out[j, i, 0] = min(max(cr, 0.0), 1.0)
             out[j, i, 1] = min(max(cg, 0.0), 1.0)
             out[j, i, 2] = min(max(cb, 0.0), 1.0)
@@ -217,7 +226,7 @@ def render_scene_to_image(Wres, Hres):
     maxv = out_np.max()
     if maxv <= 0:
         maxv = 1.0
-    img8 = np.clip((out_np ) * 255.0, 0, 255).astype(np.uint8)
+    img8 = np.clip((out_np) * 255.0, 0, 255).astype(np.uint8)
     pil = Image.fromarray(img8, mode='RGB')
     return pil
 
@@ -304,41 +313,54 @@ class LR5App:
         f = self.tab_camera
         ttk.Label(f, text="Camera position (always looks at 0,0,0)").pack(anchor='w')
 
+        # === Кнопки ортогональных видов ===
+        view_frame = ttk.LabelFrame(f, text="Ортогональные проекции")
+        view_frame.pack(fill='x', pady=8)
+
+        btn_front = ttk.Button(view_frame, text="Вид спереди", command=self.set_front_view)
+        btn_top = ttk.Button(view_frame, text="Вид сверху", command=self.set_top_view)
+        btn_side = ttk.Button(view_frame, text="Вид сбоку", command=self.set_side_view)
+
+        btn_front.pack(side='left', expand=True, fill='x', padx=4, pady=4)
+        btn_top.pack(side='left', expand=True, fill='x', padx=4, pady=4)
+        btn_side.pack(side='left', expand=True, fill='x', padx=4, pady=4)
+
+        # === Ручное управление камерой ===
         frm = ttk.Frame(f)
         frm.pack(anchor='w', pady=10)
 
         # ---- X ----
-        ttk.Label(frm, text="X").grid(row=0, column=0)
+        ttk.Label(frm, text="X").grid(row=0, column=0, padx=5)
         tk.Scale(frm, variable=self.cam_x, from_=-5000, to=5000,
                  orient='horizontal', length=300,
                  command=lambda v: self.schedule_camera_rerender()
-                 ).grid(row=0, column=1)
+                 ).grid(row=0, column=1, padx=5)
 
-        e = ttk.Entry(frm, textvariable=self.cam_x, width=8)
-        e.grid(row=0, column=2)
-        e.bind("<KeyRelease>", lambda e: self.schedule_camera_rerender())
+        ex = ttk.Entry(frm, textvariable=self.cam_x, width=8)
+        ex.grid(row=0, column=2, padx=5)
+        ex.bind("<KeyRelease>", lambda e: self.schedule_camera_rerender())
 
         # ---- Y ----
-        ttk.Label(frm, text="Y").grid(row=1, column=0)
+        ttk.Label(frm, text="Y").grid(row=1, column=0, padx=5)
         tk.Scale(frm, variable=self.cam_y, from_=-5000, to=5000,
                  orient='horizontal', length=300,
                  command=lambda v: self.schedule_camera_rerender()
-                 ).grid(row=1, column=1)
+                 ).grid(row=1, column=1, padx=5)
 
-        e = ttk.Entry(frm, textvariable=self.cam_y, width=8)
-        e.grid(row=1, column=2)
-        e.bind("<KeyRelease>", lambda e: self.schedule_camera_rerender())
+        ey = ttk.Entry(frm, textvariable=self.cam_y, width=8)
+        ey.grid(row=1, column=2, padx=5)
+        ey.bind("<KeyRelease>", lambda e: self.schedule_camera_rerender())
 
         # ---- Z ----
-        ttk.Label(frm, text="Z").grid(row=2, column=0)
+        ttk.Label(frm, text="Z").grid(row=2, column=0, padx=5)
         tk.Scale(frm, variable=self.cam_z, from_=200, to=20000,
                  orient='horizontal', length=300,
                  command=lambda v: self.schedule_camera_rerender()
-                 ).grid(row=2, column=1)
+                 ).grid(row=2, column=1, padx=5)
 
-        e = ttk.Entry(frm, textvariable=self.cam_z, width=8)
-        e.grid(row=2, column=2)
-        e.bind("<KeyRelease>", lambda e: self.schedule_camera_rerender())
+        ez = ttk.Entry(frm, textvariable=self.cam_z, width=8)
+        ez.grid(row=2, column=2, padx=5)
+        ez.bind("<KeyRelease>", lambda e: self.schedule_camera_rerender())
 
     def reset_preview_camera(self):
         self.cam_az.set(0.0)
@@ -459,7 +481,6 @@ class LR5App:
         self.lights = parsed
         messagebox.showinfo("Lights", f"Applied {len(self.lights)} lights.")
 
-
     def sync_scene_to_taichi(self):
         n = len(self.spheres)
         n = clamp(n, 0, MAX_SPHERES)
@@ -541,6 +562,27 @@ class LR5App:
             messagebox.showinfo("Saved", f"Saved {path}")
         else:
             messagebox.showinfo("No image", "Render first.")
+
+    def set_front_view(self):
+        """Вид спереди: XY плоскость, камера смотрит с +Z"""
+        self.cam_x.set(0.0)
+        self.cam_y.set(0.0)
+        self.cam_z.set(2000.0)  # далеко по Z
+        self.schedule_camera_rerender()
+
+    def set_top_view(self):
+        """Вид сверху: XZ плоскость, камера смотрит с +Y"""
+        self.cam_x.set(0.0)
+        self.cam_y.set(2000.0)  # сверху (отрицательный Y, если Y вверх)
+        self.cam_z.set(0.0)  # чтобы видеть сцену
+        self.schedule_camera_rerender()
+
+    def set_side_view(self):
+        """Вид сбоку: YZ плоскость, камера смотрит с +X"""
+        self.cam_x.set(2000.0)
+        self.cam_y.set(0.0)
+        self.cam_z.set(0.0)
+        self.schedule_camera_rerender()
 
 
 def main():
