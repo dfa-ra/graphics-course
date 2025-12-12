@@ -23,6 +23,6 @@
   - отчёт можно посмотреть [тут](docs/lab5.pdf)
 
 Пример работы программы
-![Image alt](./АКГ_лр5_сферы_taichi.png)
-![Image alt](./АКГ_лр5_сферы_taichi2.png)
+![Image alt](imgs/АКГ_лр5_сферы_taichi.png)
+![Image alt](imgs/АКГ_лр5_сферы_taichi2.png)
 
