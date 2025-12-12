@@ -525,8 +525,8 @@ class LR5App:
 
         pil = render_scene_to_image(W, H)
         self.last_image = pil
-        pil.save("АКГ_лр5_сферы_taichi.png")
-        print("Saved АКГ_лр5_сферы_taichi.png")
+        pil.save("АКГ_лр5_сферы_taichi2.png")
+        print("Saved АКГ_лр5_сферы_taichi2.png")
 
         vw = self.view.winfo_width() or 800
         vh = self.view.winfo_height() or 600
@@ -543,7 +543,7 @@ class LR5App:
 
     def save_image(self):
         if hasattr(self, 'last_image') and self.last_image is not None:
-            path = "АКГ_лр5_сферы_taichi.png"
+            path = "АКГ_лр5_сферы_taichi2.png"
             self.last_image.save(path)
             messagebox.showinfo("Saved", f"Saved {path}")
         else:
