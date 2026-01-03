@@ -93,7 +93,7 @@ class LightingLabPerfect:
         dz = p['zL']
         r = np.sqrt(dx**2 + dy**2 + dz**2 + 1e-12)
         cos_theta = np.clip(dz / r, 0, 1)
-        E = p['I0'] * cos_theta / (r**2)
+        E = p['I0'] * cos_theta / (r**2) * cos_theta
 
         mask = X**2 + Y**2 <= p['R']**2
 
