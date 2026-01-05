@@ -12,8 +12,8 @@ MAX_SPHERES = 32
 MAX_LIGHTS = 8
 
 SCREEN_Z = 0.0
-W_MM = 500.0
-H_MM = 300.0
+W_MM = 800
+H_MM = 800
 
 sphere_pos = ti.Vector.field(3, dtype=ti.f32, shape=MAX_SPHERES)
 sphere_rad = ti.field(dtype=ti.f32, shape=MAX_SPHERES)
@@ -127,6 +127,10 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
 
     right = normalize(forward.cross(world_up))
     up = normalize(right.cross(forward))
+
+    # Фокусное расстояние для правильной перспективы
+    focal_length = 1000.0
+
     half_w = w_mm / 2.0
     half_h = h_mm / 2.0
 
@@ -134,7 +138,11 @@ def render_kernel(width: int, height: int, w_mm: ti.f32, h_mm: ti.f32, screen_z:
         for i in range(width):
             u = (i + 0.5) / width - 0.5
             v = 0.5 - (j + 0.5) / height
-            dir_norm = normalize(forward + u * 2.0 * half_w / width * right + v * 2.0 * half_h / height * up)
+
+            # Рассчитываем точку на виртуальном экране
+            screen_point = u * 2.0 * half_w * right + v * 2.0 * half_h * up
+            # Луч идет от камеры через точку на экране
+            dir_norm = normalize(forward * focal_length + screen_point)
 
             nearest_t = 1e9
             nearest_idx = -1
@@ -216,7 +224,7 @@ def render_scene_to_image(Wres, Hres):
 
     out_np = np.zeros((Hres, Wres, 3), dtype=np.float32)
 
-    render_kernel(Wres, Hres, float(W_MM), float(H_MM), float(SCREEN_Z), out_np)
+    render_kernel(Wres, Hres, float(Wres), float(Hres), float(SCREEN_Z), out_np)
 
     maxv = out_np.max()
     if maxv <= 0:
@@ -525,8 +533,8 @@ class LR5App:
 
         pil = render_scene_to_image(W, H)
         self.last_image = pil
-        pil.save("АКГ_лр5_сферы_taichi2.png")
-        print("Saved АКГ_лр5_сферы_taichi2.png")
+        pil.save("АКГ_лр5_сферы_taichi.png")
+        print("Saved АКГ_лр5_сферы_taichi.png")
 
         vw = self.view.winfo_width() or 800
         vh = self.view.winfo_height() or 600

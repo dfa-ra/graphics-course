@@ -46,7 +46,7 @@ class LightingLabPerfect:
             ("X источника, мм", 'xL', -5000, 5000),
             ("Y источника, мм", 'yL', -5000, 5000),
             ("Z источника, мм", 'zL', 100, 10000),
-            ("Сила света I₀, Вт/ср", 'I0', 10, 20000),
+            ("Сила света I₀, кд", 'I0', 10, 20000),
             ("Пикселей по ширине W", 'W', 100, 1200),
             ("Пикселей по высоте H", 'H', 100, 1200),
             ("Радиус круга R, мм", 'R', 50, 6000)
@@ -64,6 +64,13 @@ class LightingLabPerfect:
                 self.vars[key].trace_add("write", lambda *_, k=key: self.labels[k].config(text=str(int(self.vars[k].get()))))
             else:
                 self.vars[key].trace_add("write", lambda *_, k=key: self.labels[k].config(text=f"{self.vars[k].get():.1f}"))
+
+        # Инициализация значений в метках
+        for key, var in self.vars.items():
+            if isinstance(var, tk.IntVar):
+                self.labels[key].config(text=str(int(var.get())))
+            else:
+                self.labels[key].config(text=f"{var.get():.1f}")
 
         ttk.Button(left, text="Сохранить PNG", command=self.save).grid(row=len(params)+1, column=0, columnspan=3, pady=20)
 
@@ -92,8 +99,9 @@ class LightingLabPerfect:
         dy = Y - p['yL']
         dz = p['zL']
         r = np.sqrt(dx**2 + dy**2 + dz**2 + 1e-12)
+        r_m = r / 1000.0  # convert mm to meters
         cos_theta = np.clip(dz / r, 0, 1)
-        E = p['I0'] * cos_theta / (r**2) * cos_theta
+        E = p['I0'] * cos_theta / (r_m**2) * cos_theta
 
         mask = X**2 + Y**2 <= p['R']**2
 
@@ -139,8 +147,6 @@ class LightingLabPerfect:
         ax1.set_ylabel('Y, мм')
         ax1.set_aspect('equal', adjustable='box')
 
-        sm = plt.cm.ScalarMappable(cmap='hot', norm=plt.Normalize(0, 255))
-        self.fig.colorbar(sm, ax=ax1, label='Нормированная яркость (0–255)', shrink=0.8)
 
         # Сечение по X
         ax2 = self.fig.add_subplot(2, 2, 3)
@@ -160,7 +166,7 @@ class LightingLabPerfect:
         ax3.set_ylabel('E, лк')
         ax3.grid(True, alpha=0.3)
 
-        txt = (f"Источник: ({p['xL']:.1f}, {p['yL']:.1f}, {p['zL']:.0f}) мм | I₀ = {p['I0']:.0f} Вт/ср\n"
+        txt = (f"Источник: ({p['xL']:.1f}, {p['yL']:.1f}, {p['zL']:.0f}) мм | I₀ = {p['I0']:.0f} кд\n"
                f"Радиус R = {p['R']:.0f} мм\n"
                f"Разрешение: W×H = {Wres}×{Hres} пикселей\n"
                f"Физический размер сцены: {scene_W:.0f}×{scene_H:.0f} мм\n\n"
