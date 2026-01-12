@@ -86,50 +86,74 @@ class LightingLabPerfect:
         Wres = int(p['W'])
         Hres = int(p['H'])
 
-        # Пропорциональный физический размер сцены, чтобы пиксели были квадратными
-        scene_W = self.base_scene_size * (Wres / 600)  # базовое количество пикселей 600
-        scene_H = self.base_scene_size * (Hres / 600)
+        # Фиксированный физический размер сцены (НЕ зависит от разрешения)
+        scene_W = self.base_scene_size
+        scene_H = self.base_scene_size
 
-        # координаты центров пикселей
-        x = np.linspace(-scene_W/2, scene_W/2, Wres, endpoint=False) + scene_W/(2*Wres)
-        y = np.linspace(-scene_H/2, scene_H/2, Hres, endpoint=False) + scene_H/(2*Hres)
+        # Координаты центров пикселей в ММ
+        x = np.linspace(-scene_W / 2, scene_W / 2, Wres)
+        y = np.linspace(-scene_H / 2, scene_H / 2, Hres)
         X, Y = np.meshgrid(x, y)
 
         dx = X - p['xL']
         dy = Y - p['yL']
         dz = p['zL']
-        r = np.sqrt(dx**2 + dy**2 + dz**2 + 1e-12)
-        r_m = r / 1000.0  # convert mm to meters
-        cos_theta = np.clip(dz / r, 0, 1)
-        E = p['I0'] * cos_theta / (r_m**2) * cos_theta
 
-        mask = X**2 + Y**2 <= p['R']**2
+        r = np.sqrt(dx ** 2 + dy ** 2 + dz ** 2)
+        cos_theta = dz / r
 
-        # Пиксельное изображение
-        E_norm = np.clip(E / np.nanmax(E) * 255, 0, 255).astype(np.uint8)
-        rgb = plt.cm.hot(E_norm / 255.0)[:, :, :3]
-        E_img = np.zeros_like(rgb)
-        E_img[mask] = rgb[mask]
-        E_img[~mask] = 0
+        # Физически корректная формула освещённости
+        E = p['I0'] * (cos_theta ** 2) / (r / 1000.0) ** 2
 
-        # Статистика
+        # Маска круга
+        mask = X ** 2 + Y ** 2 <= p['R'] ** 2
+
+        # ФИЗИЧЕСКОЕ поле освещённости (вне круга = 0)
+        E_phys = np.zeros_like(E)
+        E_phys[mask] = E[mask]
+
+        # Нормализация ТОЛЬКО для изображения
+        E_norm = np.zeros_like(E)
+        E_norm[mask] = E[mask] / np.max(E[mask])
+        E_img = plt.cm.hot(E_norm)[:, :, :3]
+
+        # Статистика (строго по физике)
+        ix0 = np.argmin(np.abs(x))
+        iy0 = np.argmin(np.abs(y))
+        ixR = np.argmin(np.abs(x - p['R']))
+        iyR = np.argmin(np.abs(y - p['R']))
+
         stats = {
-            'center': E[Hres//2, Wres//2],
-            'max': np.max(E[mask]) if np.any(mask) else 0,
-            'min': np.min(E[mask]) if np.any(mask) else 0,
-            'mean': np.mean(E[mask]) if np.any(mask) else 0
+            'center': self.E_at(0.0, 0.0, p),
+            'edge_x': self.E_at(p['R'], 0.0, p),
+            'edge_y': self.E_at(0.0, p['R'], p),
+            'max': np.max(E_phys),  # это уже по дискретной карте
+            'min': np.min(E_phys[mask]),
+            'mean': np.mean(E_phys[mask]),
         }
 
-        def val_at(xx, yy):
-            xi = int((xx + scene_W/2) / scene_W * Wres)
-            yi = int((yy + scene_H/2) / scene_H * Hres)
-            if 0 <= xi < Wres and 0 <= yi < Hres:
-                return E[yi, xi]
-            return np.nan
-        stats['edge_x'] = val_at(p['R'], 0)
-        stats['edge_y'] = val_at(0, p['R'])
+        return (
+            E_img,
+            E_phys,
+            x,
+            y,
+            stats,
+            p,
+            Wres,
+            Hres,
+            scene_W,
+            scene_H
+        )
 
-        return E_img, E, x, y, stats, p, Wres, Hres, scene_W, scene_H
+    def E_at(self, x_mm, y_mm, p):
+        dx = x_mm - p['xL']
+        dy = y_mm - p['yL']
+        dz = p['zL']
+        r_mm = (dx * dx + dy * dy + dz * dz) ** 0.5
+        cos_theta = dz / r_mm
+        E = p['I0'] * (cos_theta ** 2) / ((r_mm / 1000.0) ** 2)
+        return E
+
 
     def update_plot(self):
         self.fig.clear()
@@ -148,9 +172,16 @@ class LightingLabPerfect:
         ax1.set_aspect('equal', adjustable='box')
 
 
+        Ex = E_full[Hres//2, :]
+        Ey = E_full[:, Wres//2]
+
+        # обнуление вне круга
+        Ex[np.abs(x_line) > p['R']] = 0
+        Ey[np.abs(y_line) > p['R']] = 0
+
         # Сечение по X
         ax2 = self.fig.add_subplot(2, 2, 3)
-        ax2.plot(x_line, E_full[Hres//2, :], color='#1f77b4', lw=1.8)
+        ax2.plot(x_line, Ex)
         ax2.set_xlim(-scene_W/2, scene_W/2)
         ax2.set_title('Сечение по X (Y = 0)')
         ax2.set_xlabel('X, мм')
@@ -159,7 +190,7 @@ class LightingLabPerfect:
 
         # Сечение по Y
         ax3 = self.fig.add_subplot(2, 2, 4)
-        ax3.plot(y_line, E_full[:, Wres//2], color='#ff7f0e', lw=1.8)
+        ax3.plot(y_line, Ey)
         ax3.set_xlim(-scene_H/2, scene_H/2)
         ax3.set_title('Сечение по Y (X = 0)')
         ax3.set_xlabel('Y, мм')
