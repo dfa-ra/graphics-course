@@ -8,24 +8,24 @@ from matplotlib.figure import Figure
 import tkinter as tk
 from tkinter import ttk
 
+
 class LightingLabPerfect:
     def __init__(self, root):
         self.root = root
         self.root.title("ЛР№3 — Квадратные пиксели")
         self.root.geometry("1500x950")
 
-        # Параметры источника и количество пикселей
         self.vars = {
             'xL': tk.DoubleVar(value=624.0),
             'yL': tk.DoubleVar(value=0.0),
             'zL': tk.DoubleVar(value=1000.0),
             'I0': tk.DoubleVar(value=1000.0),
-            'W':  tk.IntVar(value=600),   # пикселей по X
-            'H':  tk.IntVar(value=600),   # пикселей по Y
-            'R':  tk.DoubleVar(value=800.0)
+            'W': tk.IntVar(value=600),
+            'H': tk.IntVar(value=600),
+            'R': tk.DoubleVar(value=800.0)
         }
 
-        # Размер базовой сцены (1 пиксель = 1 мм для начального масштаба)
+
         self.base_scene_size = 2000.0
 
         self.create_widgets()
@@ -40,7 +40,7 @@ class LightingLabPerfect:
         left = ttk.Frame(self.root, padding="15")
         left.grid(row=0, column=0, sticky="ns")
 
-        ttk.Label(left, text="Параметры", font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=3, pady=(0,15))
+        ttk.Label(left, text="Параметры", font=("Arial", 12, "bold")).grid(row=0, column=0, columnspan=3, pady=(0, 15))
 
         params = [
             ("X источника, мм", 'xL', -5000, 5000),
@@ -61,18 +61,21 @@ class LightingLabPerfect:
             self.labels[key] = lbl
 
             if isinstance(self.vars[key], tk.IntVar):
-                self.vars[key].trace_add("write", lambda *_, k=key: self.labels[k].config(text=str(int(self.vars[k].get()))))
+                self.vars[key].trace_add("write",
+                                         lambda *_, k=key: self.labels[k].config(text=str(int(self.vars[k].get()))))
             else:
-                self.vars[key].trace_add("write", lambda *_, k=key: self.labels[k].config(text=f"{self.vars[k].get():.1f}"))
+                self.vars[key].trace_add("write",
+                                         lambda *_, k=key: self.labels[k].config(text=f"{self.vars[k].get():.1f}"))
 
-        # Инициализация значений в метках
+
         for key, var in self.vars.items():
             if isinstance(var, tk.IntVar):
                 self.labels[key].config(text=str(int(var.get())))
             else:
                 self.labels[key].config(text=f"{var.get():.1f}")
 
-        ttk.Button(left, text="Сохранить PNG", command=self.save).grid(row=len(params)+1, column=0, columnspan=3, pady=20)
+        ttk.Button(left, text="Сохранить PNG", command=self.save).grid(row=len(params) + 1, column=0, columnspan=3,
+                                                                       pady=20)
 
     def setup_plot(self):
         self.fig = Figure(figsize=(14, 9), dpi=100)
@@ -154,14 +157,13 @@ class LightingLabPerfect:
         E = p['I0'] * (cos_theta ** 2) / ((r_mm / 1000.0) ** 2)
         return E
 
-
     def update_plot(self):
         self.fig.clear()
         E_img, E_full, x_line, y_line, stats, p, Wres, Hres, scene_W, scene_H = self.calculate()
 
         # Тепловая карта
-        ax1 = self.fig.add_subplot(2, 2, (1,2))
-        ax1.imshow(E_img, extent=[-scene_W/2, scene_W/2, -scene_H/2, scene_H/2],
+        ax1 = self.fig.add_subplot(2, 2, (1, 2))
+        ax1.imshow(E_img, extent=[-scene_W / 2, scene_W / 2, -scene_H / 2, scene_H / 2],
                    origin='lower', interpolation='none')
         circle = plt.Circle((0, 0), p['R'], color='cyan', fill=False, lw=2, ls='--')
         ax1.add_patch(circle)
@@ -171,9 +173,8 @@ class LightingLabPerfect:
         ax1.set_ylabel('Y, мм')
         ax1.set_aspect('equal', adjustable='box')
 
-
-        Ex = E_full[Hres//2, :]
-        Ey = E_full[:, Wres//2]
+        Ex = E_full[Hres // 2, :]
+        Ey = E_full[:, Wres // 2]
 
         # обнуление вне круга
         Ex[np.abs(x_line) > p['R']] = 0
@@ -182,7 +183,7 @@ class LightingLabPerfect:
         # Сечение по X
         ax2 = self.fig.add_subplot(2, 2, 3)
         ax2.plot(x_line, Ex)
-        ax2.set_xlim(-scene_W/2, scene_W/2)
+        ax2.set_xlim(-scene_W / 2, scene_W / 2)
         ax2.set_title('Сечение по X (Y = 0)')
         ax2.set_xlabel('X, мм')
         ax2.set_ylabel('E, лк')
@@ -191,7 +192,7 @@ class LightingLabPerfect:
         # Сечение по Y
         ax3 = self.fig.add_subplot(2, 2, 4)
         ax3.plot(y_line, Ey)
-        ax3.set_xlim(-scene_H/2, scene_H/2)
+        ax3.set_xlim(-scene_H / 2, scene_H / 2)
         ax3.set_title('Сечение по Y (X = 0)')
         ax3.set_xlabel('Y, мм')
         ax3.set_ylabel('E, лк')
@@ -216,6 +217,7 @@ class LightingLabPerfect:
         fn = f"LR3_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
         self.fig.savefig(fn, dpi=300, bbox_inches='tight', facecolor='white')
         print(f"Сохранено: {fn}")
+
 
 if __name__ == "__main__":
     root = tk.Tk()
