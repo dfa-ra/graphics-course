@@ -186,8 +186,7 @@ def main():
         scene.render()
         if scene.bilateral_on[None] != 0:
             scene.resolve_geom_guides_and_dominant()
-            scene.bilateral_filter_hdr()
-            scene.preserve_energy_per_object()
+            scene.bilateral_sep_and_preserve()
         scene.tonemap()
         gui.set_image(scene.image)
         gui.show()

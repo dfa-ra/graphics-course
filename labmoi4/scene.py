@@ -1,8 +1,14 @@
+import numpy as np
 import taichi as ti
 
 from config import (
     ASPECT,
+    BILATERAL_DIFF_OBJ_WEIGHT,
     BILATERAL_RADIUS,
+    BILATERAL_SIG_N,
+    BILATERAL_SIG_R_LOG,
+    BILATERAL_SIG_S,
+    BILATERAL_SIG_Z,
     IMAGE_H,
     IMAGE_W,
     MAX_SPP,
@@ -51,11 +57,12 @@ geom_normal_guide = ti.Vector.field(3, dtype=ti.f32, shape=(IMAGE_W, IMAGE_H))
 dominant_obj = ti.field(dtype=ti.i32, shape=(IMAGE_W, IMAGE_H))
 
 filtered_hdr = ti.Vector.field(3, dtype=ti.f32, shape=(IMAGE_W, IMAGE_H))
+bilateral_temp = ti.Vector.field(3, dtype=ti.f32, shape=(IMAGE_W, IMAGE_H))
 bilateral_on = ti.field(dtype=ti.i32, shape=())
 
-# Суммы яркости по доминирующему объекту (−1..SPHERE_COUNT−1 → индекс 0..SPHERE_COUNT).
-lum_in_per_obj = ti.field(dtype=ti.f32, shape=(SPHERE_COUNT + 1,))
-lum_out_per_obj = ti.field(dtype=ti.f32, shape=(SPHERE_COUNT + 1,))
+luma_row_in = ti.field(dtype=ti.f32, shape=(IMAGE_H,))
+luma_row_out = ti.field(dtype=ti.f32, shape=(IMAGE_H,))
+preserve_luma_scale = ti.field(dtype=ti.f32, shape=())
 
 
 @ti.kernel
@@ -360,97 +367,145 @@ def resolve_geom_guides_and_dominant():
         dominant_obj[x, y] = dom_bin - 1
 
 
-@ti.kernel
-def bilateral_filter_hdr():
-    """Билатераль по яркости + веса по глубине, нормали и индексу объекта (сохранение границ)."""
-    half = BILATERAL_RADIUS
-    sig_s = 1.25
-    sig_r = 0.07
-    sig_z = 0.55
-    sig_n = 0.35
-    different_obj_scale = 0.04
+@ti.func
+def log_mean_luminance(rgb):
+    return ti.log(ti.max(luminance(rgb), 1e-6))
 
-    for x, y in filtered_hdr:
-        ip = image[x, y]
+
+@ti.kernel
+def bilateral_pass_horizontal():
+    """Первый разделяемый проход по X (яркость в log для HDR)."""
+    half = BILATERAL_RADIUS
+    sig_s = BILATERAL_SIG_S
+    sig_r = BILATERAL_SIG_R_LOG
+    sig_z = BILATERAL_SIG_Z
+    sig_n = BILATERAL_SIG_N
+    different_obj_scale = BILATERAL_DIFF_OBJ_WEIGHT
+
+    for x, y in bilateral_temp:
         zp = geom_depth_guide[x, y]
         np_ = geom_normal_guide[x, y]
         id_p = dominant_obj[x, y]
+        hsp = geom_hit_samples[x, y]
+        ip = image[x, y]
+        lp = log_mean_luminance(ip)
 
         wp_sum = 0.0
         acc = ti.Vector([0.0, 0.0, 0.0])
-        lp = luminance(ip)
+        for i in range(-half, half + 1):
+            xi = ti.max(0, ti.min(IMAGE_W - 1, x + i))
+            iq = image[xi, y]
 
-        for j in range(-half, half + 1):
-            for i in range(-half, half + 1):
-                xi = ti.max(0, ti.min(IMAGE_W - 1, x + i))
-                yj = ti.max(0, ti.min(IMAGE_H - 1, y + j))
-                iq = image[xi, yj]
+            dz = zp - geom_depth_guide[xi, y]
+            nd = ti.max(np_.dot(geom_normal_guide[xi, y]), 0.0)
 
-                dz = zp - geom_depth_guide[xi, yj]
-                nd = ti.max(np_.dot(geom_normal_guide[xi, yj]), 0.0)
+            gz = ti.exp(-(dz * dz) / (2.0 * sig_z * sig_z + 1e-8))
+            zn = zp * geom_depth_guide[xi, y]
+            gz = ti.select(zn < 1e-8, 1.0, gz)
 
-                gz = ti.exp(-(dz * dz) / (2.0 * sig_z * sig_z + 1e-6))
-                zn = zp * geom_depth_guide[xi, yj]
-                gz = ti.select(zn < 1e-8, 1.0, gz)
+            gn = ti.exp(-((1.0 - nd) * (1.0 - nd)) / (2.0 * sig_n * sig_n + 1e-8))
+            if hsp <= 0:
+                gn = 1.0
+            if geom_hit_samples[xi, y] <= 0:
+                gn = 1.0
 
-                gn = ti.exp(-((1.0 - nd) * (1.0 - nd)) / (2.0 * sig_n * sig_n + 1e-6))
-                if geom_hit_samples[x, y] <= 0 or geom_hit_samples[xi, yj] <= 0:
-                    gn = 1.0
+            gid = ti.select(id_p != dominant_obj[xi, y], different_obj_scale, 1.0)
+            gs = ti.exp(-(ti.cast(i * i, ti.f32)) / (2.0 * sig_s * sig_s + 1e-8))
 
-                g_id = 1.0
-                if id_p != dominant_obj[xi, yj]:
-                    g_id = different_obj_scale
+            lq = log_mean_luminance(iq)
+            dr = lp - lq
+            gr = ti.exp(-(dr * dr) / (2.0 * sig_r * sig_r + 1e-8))
 
-                ds = ti.cast(i * i + j * j, ti.f32)
-                gs = ti.exp(-ds / (2.0 * sig_s * sig_s + 1e-6))
+            w = gs * gr * gz * gn * gid
+            acc += iq * w
+            wp_sum += w
 
-                lq = luminance(iq)
-                dr = lp - lq
-                gr = ti.exp(-(dr * dr) / (2.0 * sig_r * sig_r + 1e-6))
-
-                w = gs * gr * gz * gn * g_id
-                acc += iq * w
-                wp_sum += w
-
-        if wp_sum > 1e-8:
-            filtered_hdr[x, y] = acc / wp_sum
-        else:
-            filtered_hdr[x, y] = ip
+        bilateral_temp[x, y] = ti.select(wp_sum > 1e-8, acc / wp_sum, ip)
 
 
 @ti.kernel
-def clear_obj_luma_sums():
-    for i in range(SPHERE_COUNT + 1):
-        lum_in_per_obj[i] = 0.0
-        lum_out_per_obj[i] = 0.0
+def bilateral_pass_vertical():
+    """Второй проход по Y; вес по яркости — от исходного HDR, цвет — из промежуточного."""
+    half = BILATERAL_RADIUS
+    sig_s = BILATERAL_SIG_S
+    sig_r = BILATERAL_SIG_R_LOG
+    sig_z = BILATERAL_SIG_Z
+    sig_n = BILATERAL_SIG_N
+    different_obj_scale = BILATERAL_DIFF_OBJ_WEIGHT
 
-
-@ti.kernel
-def accumulate_obj_luma_sums():
-    for x, y in image:
-        idx = dominant_obj[x, y] + 1
-        li = luminance(image[x, y])
-        lo = luminance(filtered_hdr[x, y])
-        ti.atomic_add(lum_in_per_obj[idx], li)
-        ti.atomic_add(lum_out_per_obj[idx], lo)
-
-
-@ti.kernel
-def apply_obj_luminance_scales():
     for x, y in filtered_hdr:
-        idx = dominant_obj[x, y] + 1
-        denom = lum_out_per_obj[idx]
-        sc = 1.0
-        if denom > 1e-6:
-            sc = lum_in_per_obj[idx] / denom
+        zp = geom_depth_guide[x, y]
+        np_ = geom_normal_guide[x, y]
+        id_p = dominant_obj[x, y]
+        hsp = geom_hit_samples[x, y]
+        lp = log_mean_luminance(image[x, y])
+
+        wp_sum = 0.0
+        acc = ti.Vector([0.0, 0.0, 0.0])
+        for j in range(-half, half + 1):
+            yj = ti.max(0, ti.min(IMAGE_H - 1, y + j))
+
+            dz = zp - geom_depth_guide[x, yj]
+            nd = ti.max(np_.dot(geom_normal_guide[x, yj]), 0.0)
+
+            gz = ti.exp(-(dz * dz) / (2.0 * sig_z * sig_z + 1e-8))
+            zn = zp * geom_depth_guide[x, yj]
+            gz = ti.select(zn < 1e-8, 1.0, gz)
+
+            gn = ti.exp(-((1.0 - nd) * (1.0 - nd)) / (2.0 * sig_n * sig_n + 1e-8))
+            if hsp <= 0:
+                gn = 1.0
+            if geom_hit_samples[x, yj] <= 0:
+                gn = 1.0
+
+            gid = ti.select(id_p != dominant_obj[x, yj], different_obj_scale, 1.0)
+            gs = ti.exp(-(ti.cast(j * j, ti.f32)) / (2.0 * sig_s * sig_s + 1e-8))
+
+            lq = log_mean_luminance(image[x, yj])
+            dr = lp - lq
+            gr = ti.exp(-(dr * dr) / (2.0 * sig_r * sig_r + 1e-8))
+
+            w = gs * gr * gz * gn * gid
+            acc += bilateral_temp[x, yj] * w
+            wp_sum += w
+
+        ip = image[x, y]
+        filtered_hdr[x, y] = ti.select(wp_sum > 1e-8, acc / wp_sum, ip)
+
+
+@ti.kernel
+def preserve_luma_sum_rows():
+    """Сумма яркости по строкам — без глобальных атомиков (90k потоков в два счётчика)."""
+    for y in range(IMAGE_H):
+        si = 0.0
+        so = 0.0
+        for x in range(IMAGE_W):
+            si += luminance(image[x, y])
+            so += luminance(filtered_hdr[x, y])
+        luma_row_in[y] = si
+        luma_row_out[y] = so
+
+
+@ti.kernel
+def preserve_luma_multiply_filtered():
+    sc = preserve_luma_scale[None]
+    for x, y in filtered_hdr:
         filtered_hdr[x, y] = filtered_hdr[x, y] * sc
 
 
-def preserve_energy_per_object():
-    """Нормировка по объекту: сумма яркости после фильтра = до (как в методичке)."""
-    clear_obj_luma_sums()
-    accumulate_obj_luma_sums()
-    apply_obj_luminance_scales()
+def bilateral_sep_and_preserve():
+    """Два быстых прохода + глобальное сохранение средней яркости (дешевле и стабильнее по объекту)."""
+    bilateral_pass_horizontal()
+    bilateral_pass_vertical()
+    preserve_luma_sum_rows()
+    ti.sync()
+    num = float(np.sum(luma_row_in.to_numpy()))
+    den = float(np.sum(luma_row_out.to_numpy()))
+    if den > 1e-6:
+        preserve_luma_scale[None] = np.float32(num / den)
+    else:
+        preserve_luma_scale[None] = 1.0
+    preserve_luma_multiply_filtered()
 
 
 @ti.kernel
