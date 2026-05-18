@@ -23,6 +23,7 @@ def print_hotkeys():
         "  h j      contrast − / +\n"
         "  b        bloom on/off\n"
         "  g        vignette on/off\n"
+        "  f        bilateral low-pass (noise) on/off\n"
         "  m        animated lights on/off\n"
         "  r        reset accumulation\n"
         "  o        save PNG screenshot\n"
@@ -45,6 +46,7 @@ def main():
     scene.trace_depth_limit[None] = MAX_TRACE_DEPTH
     scene.saturation[None] = 1.0
     scene.contrast[None] = 1.0
+    scene.bilateral_on[None] = 0
 
     gui = ti.GUI("Path Tracing — labmoi4", (IMAGE_W, IMAGE_H))
     scene.sample_count[None] = 0
@@ -130,6 +132,10 @@ def main():
             scene.vignette_on[None] = 1 - scene.vignette_on[None]
             cam.control_cd = 8
 
+        if gui.is_pressed("f") and cam.control_cd == 0:
+            scene.bilateral_on[None] = 1 - scene.bilateral_on[None]
+            cam.control_cd = 8
+
         if gui.is_pressed("r"):
             scene_changed = True
 
@@ -178,6 +184,9 @@ def main():
         scene.camera_up[None] = up_axis
 
         scene.render()
+        if scene.bilateral_on[None] != 0:
+            scene.resolve_geom_guides_and_dominant()
+            scene.bilateral_sep_and_preserve()
         scene.tonemap()
         gui.set_image(scene.image)
         gui.show()

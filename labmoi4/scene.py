@@ -1,7 +1,14 @@
+import numpy as np
 import taichi as ti
 
 from config import (
     ASPECT,
+    BILATERAL_DIFF_OBJ_WEIGHT,
+    BILATERAL_RADIUS,
+    BILATERAL_SIG_N,
+    BILATERAL_SIG_R_LOG,
+    BILATERAL_SIG_S,
+    BILATERAL_SIG_Z,
     IMAGE_H,
     IMAGE_W,
     MAX_SPP,
@@ -36,6 +43,26 @@ sky_mul = ti.field(dtype=ti.f32, shape=())
 trace_depth_limit = ti.field(dtype=ti.i32, shape=())
 saturation = ti.field(dtype=ti.f32, shape=())
 contrast = ti.field(dtype=ti.f32, shape=())
+
+# Гиды для билатерального фильтра (первое пересечение луча со сценой).
+OBJ_HIST_BINS = SPHERE_COUNT + 1
+
+geom_depth_sum = ti.field(dtype=ti.f32, shape=(IMAGE_W, IMAGE_H))
+geom_normal_sum = ti.Vector.field(3, dtype=ti.f32, shape=(IMAGE_W, IMAGE_H))
+geom_hit_samples = ti.field(dtype=ti.i32, shape=(IMAGE_W, IMAGE_H))
+obj_hist = ti.field(dtype=ti.i32, shape=(IMAGE_W, IMAGE_H, OBJ_HIST_BINS))
+
+geom_depth_guide = ti.field(dtype=ti.f32, shape=(IMAGE_W, IMAGE_H))
+geom_normal_guide = ti.Vector.field(3, dtype=ti.f32, shape=(IMAGE_W, IMAGE_H))
+dominant_obj = ti.field(dtype=ti.i32, shape=(IMAGE_W, IMAGE_H))
+
+filtered_hdr = ti.Vector.field(3, dtype=ti.f32, shape=(IMAGE_W, IMAGE_H))
+bilateral_temp = ti.Vector.field(3, dtype=ti.f32, shape=(IMAGE_W, IMAGE_H))
+bilateral_on = ti.field(dtype=ti.i32, shape=())
+
+luma_row_in = ti.field(dtype=ti.f32, shape=(IMAGE_H,))
+luma_row_out = ti.field(dtype=ti.f32, shape=(IMAGE_H,))
+preserve_luma_scale = ti.field(dtype=ti.f32, shape=())
 
 
 @ti.kernel
@@ -220,9 +247,13 @@ def hit_spheres(origin, direction):
 
 
 @ti.func
-def trace(origin, direction):
+def trace_with_primary(origin, direction):
+    """Полная энергия + геометрия первого пересечения (для билатерального фильтра)."""
     color = ti.Vector([0.0, 0.0, 0.0])
     throughput = ti.Vector([1.0, 1.0, 1.0])
+    prim_depth = 0.0
+    prim_n = ti.Vector([0.0, 0.0, 0.0])
+    prim_id = -1
 
     lim = trace_depth_limit[None]
     if lim < 2:
@@ -230,16 +261,24 @@ def trace(origin, direction):
     if lim > MAX_TRACE_DEPTH:
         lim = MAX_TRACE_DEPTH
 
+    o = origin
+    d = direction
+
     for depth in range(MAX_TRACE_DEPTH):
         if depth >= lim:
             break
-        hit_id, t, normal = hit_spheres(origin, direction)
+        hit_id, t, normal = hit_spheres(o, d)
         if hit_id == -1:
-            color += throughput * sky_color(direction) * sky_mul[None]
+            color += throughput * sky_color(d) * sky_mul[None]
             break
 
-        hit_point = origin + t * direction
+        hit_point = o + t * d
         color += throughput * sphere_emission[hit_id]
+
+        if depth == 0:
+            prim_depth = t
+            prim_n = normal
+            prim_id = hit_id
 
         if depth > 2:
             survival = max(throughput.max(), 0.1)
@@ -247,16 +286,17 @@ def trace(origin, direction):
                 break
             throughput /= survival
 
-        if sphere_metallic[hit_id] > 0.5:
-            direction = reflect(direction, normal)
+        m = sphere_metallic[hit_id]
+        m = ti.min(ti.max(m, 0.0), 1.0)
+        if ti.random() < m:
+            d = reflect(d, normal)
         else:
-            direction = (normal + random_in_unit_sphere()).normalized()
+            d = (normal + random_in_unit_sphere()).normalized()
 
         throughput *= sphere_albedo[hit_id]
-        origin = hit_point + normal * 0.001
+        o = hit_point + normal * 0.001
 
-    return color
-
+    return color, prim_depth, prim_n, prim_id
 
 @ti.kernel
 def render():
@@ -284,16 +324,199 @@ def render():
                     + (u - 0.5) * 2.0 * ASPECT * camera_right[None] * fs
                     + (v - 0.5) * 2.0 * camera_up[None] * fs
                 ).normalized()
-                pixel += trace(ox, ray_dir)
+                col, pz, pn, pid = trace_with_primary(ox, ray_dir)
+                pixel += col
+                if pid >= 0:
+                    geom_depth_sum[x, y] += pz
+                    geom_normal_sum[x, y] += pn
+                    geom_hit_samples[x, y] += 1
+                    ti.atomic_add(obj_hist[x, y, pid + 1], 1)
+                else:
+                    ti.atomic_add(obj_hist[x, y, 0], 1)
         accumulator[x, y] += pixel
         n = sample_count[None] + 1
         image[x, y] = accumulator[x, y] / n
 
 
+@ti.func
+def luminance(rgb):
+    return 0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+
+
+@ti.kernel
+def resolve_geom_guides_and_dominant():
+    """Средняя глубина/нормаль по сэмплам и доминирующий id объекта (гистограмма)."""
+    for x, y in geom_depth_guide:
+        hc = geom_hit_samples[x, y]
+        zg = 0.0
+        ng = ti.Vector([0.0, 0.0, 0.0])
+        if hc > 0:
+            zg = geom_depth_sum[x, y] / ti.cast(hc, ti.f32)
+            ng = (geom_normal_sum[x, y] / ti.cast(hc, ti.f32)).normalized()
+        geom_depth_guide[x, y] = zg
+        geom_normal_guide[x, y] = ng
+
+        best = -1
+        dom_bin = 0
+        for b in ti.static(range(OBJ_HIST_BINS)):
+            v = obj_hist[x, y, b]
+            if v > best:
+                best = v
+                dom_bin = b
+        # bin 0 — небо/промах; bin k+1 — сфера k
+        dominant_obj[x, y] = dom_bin - 1
+
+
+@ti.func
+def log_mean_luminance(rgb):
+    return ti.log(ti.max(luminance(rgb), 1e-6))
+
+
+@ti.kernel
+def bilateral_pass_horizontal():
+    """Первый разделяемый проход по X (яркость в log для HDR)."""
+    half = BILATERAL_RADIUS
+    sig_s = BILATERAL_SIG_S
+    sig_r = BILATERAL_SIG_R_LOG
+    sig_z = BILATERAL_SIG_Z
+    sig_n = BILATERAL_SIG_N
+    different_obj_scale = BILATERAL_DIFF_OBJ_WEIGHT
+
+    for x, y in bilateral_temp:
+        zp = geom_depth_guide[x, y]
+        np_ = geom_normal_guide[x, y]
+        id_p = dominant_obj[x, y]
+        hsp = geom_hit_samples[x, y]
+        ip = image[x, y]
+        lp = log_mean_luminance(ip)
+
+        wp_sum = 0.0
+        acc = ti.Vector([0.0, 0.0, 0.0])
+        for i in range(-half, half + 1):
+            xi = ti.max(0, ti.min(IMAGE_W - 1, x + i))
+            iq = image[xi, y]
+
+            dz = zp - geom_depth_guide[xi, y]
+            nd = ti.max(np_.dot(geom_normal_guide[xi, y]), 0.0)
+
+            gz = ti.exp(-(dz * dz) / (2.0 * sig_z * sig_z + 1e-8))
+            zn = zp * geom_depth_guide[xi, y]
+            gz = ti.select(zn < 1e-8, 1.0, gz)
+
+            gn = ti.exp(-((1.0 - nd) * (1.0 - nd)) / (2.0 * sig_n * sig_n + 1e-8))
+            if hsp <= 0:
+                gn = 1.0
+            if geom_hit_samples[xi, y] <= 0:
+                gn = 1.0
+
+            gid = ti.select(id_p != dominant_obj[xi, y], different_obj_scale, 1.0)
+            gs = ti.exp(-(ti.cast(i * i, ti.f32)) / (2.0 * sig_s * sig_s + 1e-8))
+
+            lq = log_mean_luminance(iq)
+            dr = lp - lq
+            gr = ti.exp(-(dr * dr) / (2.0 * sig_r * sig_r + 1e-8))
+
+            w = gs * gr * gz * gn * gid
+            acc += iq * w
+            wp_sum += w
+
+        bilateral_temp[x, y] = ti.select(wp_sum > 1e-8, acc / wp_sum, ip)
+
+
+@ti.kernel
+def bilateral_pass_vertical():
+    """Второй проход по Y; вес по яркости — от исходного HDR, цвет — из промежуточного."""
+    half = BILATERAL_RADIUS
+    sig_s = BILATERAL_SIG_S
+    sig_r = BILATERAL_SIG_R_LOG
+    sig_z = BILATERAL_SIG_Z
+    sig_n = BILATERAL_SIG_N
+    different_obj_scale = BILATERAL_DIFF_OBJ_WEIGHT
+
+    for x, y in filtered_hdr:
+        zp = geom_depth_guide[x, y]
+        np_ = geom_normal_guide[x, y]
+        id_p = dominant_obj[x, y]
+        hsp = geom_hit_samples[x, y]
+        lp = log_mean_luminance(image[x, y])
+
+        wp_sum = 0.0
+        acc = ti.Vector([0.0, 0.0, 0.0])
+        for j in range(-half, half + 1):
+            yj = ti.max(0, ti.min(IMAGE_H - 1, y + j))
+
+            dz = zp - geom_depth_guide[x, yj]
+            nd = ti.max(np_.dot(geom_normal_guide[x, yj]), 0.0)
+
+            gz = ti.exp(-(dz * dz) / (2.0 * sig_z * sig_z + 1e-8))
+            zn = zp * geom_depth_guide[x, yj]
+            gz = ti.select(zn < 1e-8, 1.0, gz)
+
+            gn = ti.exp(-((1.0 - nd) * (1.0 - nd)) / (2.0 * sig_n * sig_n + 1e-8))
+            if hsp <= 0:
+                gn = 1.0
+            if geom_hit_samples[x, yj] <= 0:
+                gn = 1.0
+
+            gid = ti.select(id_p != dominant_obj[x, yj], different_obj_scale, 1.0)
+            gs = ti.exp(-(ti.cast(j * j, ti.f32)) / (2.0 * sig_s * sig_s + 1e-8))
+
+            lq = log_mean_luminance(image[x, yj])
+            dr = lp - lq
+            gr = ti.exp(-(dr * dr) / (2.0 * sig_r * sig_r + 1e-8))
+
+            w = gs * gr * gz * gn * gid
+            acc += bilateral_temp[x, yj] * w
+            wp_sum += w
+
+        ip = image[x, y]
+        filtered_hdr[x, y] = ti.select(wp_sum > 1e-8, acc / wp_sum, ip)
+
+
+@ti.kernel
+def preserve_luma_sum_rows():
+    """Сумма яркости по строкам — без глобальных атомиков (90k потоков в два счётчика)."""
+    for y in range(IMAGE_H):
+        si = 0.0
+        so = 0.0
+        for x in range(IMAGE_W):
+            si += luminance(image[x, y])
+            so += luminance(filtered_hdr[x, y])
+        luma_row_in[y] = si
+        luma_row_out[y] = so
+
+
+@ti.kernel
+def preserve_luma_multiply_filtered():
+    sc = preserve_luma_scale[None]
+    for x, y in filtered_hdr:
+        filtered_hdr[x, y] = filtered_hdr[x, y] * sc
+
+
+def bilateral_sep_and_preserve():
+    """Два быстых прохода + глобальное сохранение средней яркости (дешевле и стабильнее по объекту)."""
+    bilateral_pass_horizontal()
+    bilateral_pass_vertical()
+    preserve_luma_sum_rows()
+    ti.sync()
+    num = float(np.sum(luma_row_in.to_numpy()))
+    den = float(np.sum(luma_row_out.to_numpy()))
+    if den > 1e-6:
+        preserve_luma_scale[None] = np.float32(num / den)
+    else:
+        preserve_luma_scale[None] = 1.0
+    preserve_luma_multiply_filtered()
+
+
 @ti.kernel
 def tonemap():
     for x, y in image:
-        c = image[x, y] * exposure_mul[None]
+        hdr = ti.Vector([0.0, 0.0, 0.0])
+        if bilateral_on[None] != 0:
+            hdr = filtered_hdr[x, y]
+        else:
+            hdr = image[x, y]
+        c = hdr * exposure_mul[None]
         c = aces_approx(c)
         if bloom_on[None] != 0:
             br = ti.max(c[0] - 0.52, 0.0)
@@ -328,3 +551,7 @@ def tonemap():
 def clear_accumulator():
     accumulator.fill(0)
     sample_count[None] = 0
+    geom_depth_sum.fill(0)
+    geom_normal_sum.fill(0)
+    geom_hit_samples.fill(0)
+    obj_hist.fill(0)
